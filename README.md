@@ -89,3 +89,7 @@ fraction of a second.
 Everything lives in `~/.supersimple/` (`data.json`, `config.json`,
 `analytics/`, `logs/`, `last-analysis.md`). Set `SUPERSIMPLE_HOME` to use
 another folder.
+
+## License
+
+MIT - see [LICENSE](LICENSE).

@@ -1,0 +1,9 @@
+{
+  "name": "supersimple-analytics",
+  "private": true,
+  "type": "module",
+  "description": "Runs the Super Simple weekly analysis through the Claude Agent SDK",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "latest"
+  }
+}

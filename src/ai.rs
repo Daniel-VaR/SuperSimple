@@ -511,20 +511,59 @@ fn last_report_path() -> PathBuf {
     store::home().join("last-analysis.md")
 }
 
-pub fn save_last_report(out: &Outcome) {
-    let meta = format!(
-        "{} · {}",
-        Local::now().format("%a %b %d %H:%M"),
-        out.summary_line().trim_start_matches("ok · ")
-    );
-    let _ = fs::write(last_report_path(), format!("{meta}\n{}\n", out.text));
+/// Every successful analysis is kept here, one file each, named by its time.
+pub fn retros_dir() -> PathBuf {
+    store::home().join("retros")
 }
 
-/// (meta line, report text) of the last successful analysis.
-pub fn load_last_report() -> Option<(String, String)> {
-    let text = fs::read_to_string(last_report_path()).ok()?;
+fn retro_files() -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = fs::read_dir(retros_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "md"))
+        .collect();
+    files.sort();
+    files.reverse(); // names start with the time, so this is newest first
+    files
+}
+
+/// Save a finished analysis: as the latest one and into the history folder.
+pub fn save_last_report(out: &Outcome) {
+    let now = Local::now();
+    let meta = format!(
+        "{} · {}",
+        now.format("%a %b %d %Y %H:%M"),
+        out.summary_line().trim_start_matches("ok · ")
+    );
+    let dir = retros_dir();
+    let _ = fs::create_dir_all(&dir);
+    // an analysis made before the history existed: keep it as the first entry
+    if retro_files().is_empty() {
+        if let Ok(meta) = fs::metadata(last_report_path()) {
+            let at: DateTime<Local> = meta.modified().map(Into::into).unwrap_or(now);
+            let _ = fs::copy(last_report_path(), dir.join(format!("{}.md", at.format("%Y%m%d-%H%M%S-%3f"))));
+        }
+    }
+    let content = format!("{meta}\n{}\n", out.text);
+    let _ = fs::write(dir.join(format!("{}.md", now.format("%Y%m%d-%H%M%S-%3f"))), &content);
+    let _ = fs::write(last_report_path(), content);
+}
+
+fn read_report(path: &std::path::Path) -> Option<(String, String)> {
+    let text = fs::read_to_string(path).ok()?;
     let (meta, body) = text.split_once('\n')?;
     Some((meta.to_string(), body.trim().to_string()))
+}
+
+/// (meta line, report text) of every saved analysis, newest first.
+pub fn load_reports() -> Vec<(String, String)> {
+    let all: Vec<_> = retro_files().iter().filter_map(|p| read_report(p)).collect();
+    if all.is_empty() {
+        return read_report(&last_report_path()).into_iter().collect();
+    }
+    all
 }
 
 // ---------------------------------------------------------------- status + wizard
@@ -609,6 +648,7 @@ pub fn print_status() {
     );
     println!("  Config: {}", config_path().display());
     println!("  Logs:   {}", logs_dir().display());
+    println!("  Past analyses: {} in {}", load_reports().len(), retros_dir().display());
 }
 
 fn ask(prompt: &str) -> String {
@@ -771,4 +811,38 @@ pub fn setup_wizard() -> Result<bool> {
         println!("Details are in the log file above. Run `supersimple setup` again after fixing.");
     }
     Ok(out.ok)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_analysis_is_kept_and_an_older_one_is_not_lost() {
+        let home = std::env::temp_dir().join(format!("supersimple-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        std::env::set_var("SUPERSIMPLE_HOME", &home);
+        assert!(load_reports().is_empty());
+        // an analysis from before the history folder existed
+        fs::write(home.join("last-analysis.md"), "Fri Nov 13 19:10 · 11s\nold report\n").unwrap();
+        assert_eq!(load_reports().len(), 1);
+        let out = |text: &str| Outcome {
+            ok: true,
+            text: text.into(),
+            error: None,
+            log_path: PathBuf::new(),
+            cost_usd: Some(0.03),
+            turns: Some(5),
+            secs: 11.0,
+            skills: vec![],
+        };
+        std::thread::sleep(Duration::from_millis(5));
+        save_last_report(&out("second report"));
+        std::thread::sleep(Duration::from_millis(5));
+        save_last_report(&out("third report"));
+        let texts: Vec<String> = load_reports().into_iter().map(|(_, t)| t).collect();
+        assert_eq!(texts, ["third report", "second report", "old report"]);
+        let _ = fs::remove_dir_all(&home);
+    }
 }

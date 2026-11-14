@@ -53,6 +53,8 @@ subject is one line of its own. In that screen:
   Python, the SDK, credentials and the transcript folder, helps add what is
   missing, and finishes with a test run.
 - `c` cancels a running analysis.
+- `←` / `→` page through past analyses. Every analysis is saved in
+  `~/.supersimple/retros/`, one file each.
 
 Guards on every AI run (edit `~/.supersimple/config.json`):
 
@@ -72,6 +74,8 @@ message, stderr, why it ended, cost).
 supersimple ai status   # what is configured
 supersimple ai test     # the small connection test
 supersimple ai run      # run the analysis and print it
+supersimple ai history  # list the saved analyses, newest first
+supersimple ai show 2   # print a saved one (1 = latest)
 ```
 
 ## For AI agents
@@ -88,7 +92,7 @@ fraction of a second.
 ## Files
 
 Everything lives in `~/.supersimple/` (`data.json`, `config.json`,
-`analytics/`, `logs/`, `last-analysis.md`). Set `SUPERSIMPLE_HOME` to use
+`analytics/`, `logs/`, `retros/`, `last-analysis.md`). Set `SUPERSIMPLE_HOME` to use
 another folder.
 
 ## License

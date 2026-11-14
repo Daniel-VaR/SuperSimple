@@ -200,7 +200,9 @@ struct App {
     retro_scroll: u16,
     ai_scroll: u16,
     ai_run: Option<AiRun>,
-    ai_report: Option<(String, String)>,
+    /// every saved analysis, newest first, and the one on screen
+    ai_reports: Vec<(String, String)>,
+    ai_idx: usize,
     ai_error: Option<String>,
 }
 
@@ -242,7 +244,8 @@ impl App {
             retro_scroll: 0,
             ai_scroll: 0,
             ai_run: None,
-            ai_report: ai::load_last_report(),
+            ai_reports: ai::load_reports(),
+            ai_idx: 0,
             ai_error: None,
         })
     }
@@ -407,7 +410,8 @@ impl App {
             self.ai_run = None;
             if out.ok {
                 ai::save_last_report(&out);
-                self.ai_report = ai::load_last_report();
+                self.ai_reports = ai::load_reports();
+                self.ai_idx = 0;
                 self.ai_error = None;
                 self.ai_scroll = 0;
             } else {
@@ -859,6 +863,23 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => self.retro_scroll = self.retro_scroll.saturating_add(1),
             KeyCode::PageUp => self.ai_scroll = self.ai_scroll.saturating_sub(5),
             KeyCode::PageDown => self.ai_scroll = self.ai_scroll.saturating_add(5),
+            // older / newer saved analyses
+            KeyCode::Left | KeyCode::Char('[') => {
+                if self.ai_idx + 1 < self.ai_reports.len() {
+                    self.ai_idx += 1;
+                    self.ai_scroll = 0;
+                } else {
+                    self.flash("this is the oldest saved analysis");
+                }
+            }
+            KeyCode::Right | KeyCode::Char(']') => {
+                if self.ai_idx > 0 {
+                    self.ai_idx -= 1;
+                    self.ai_scroll = 0;
+                } else {
+                    self.flash("this is the latest analysis");
+                }
+            }
             KeyCode::Char('a') => self.start_ai(),
             KeyCode::Char('c') => {
                 if let Some(run) = &self.ai_run {
@@ -1263,9 +1284,12 @@ impl App {
             }
             ai.push(Line::default());
         }
-        match &self.ai_report {
+        let count = self.ai_reports.len();
+        self.ai_idx = self.ai_idx.min(count.saturating_sub(1));
+        match self.ai_reports.get(self.ai_idx) {
             Some((meta, text)) => {
-                ai.push(Line::styled(format!("Last analysis: {meta}"), Style::new().dim()));
+                let which = if self.ai_idx == 0 { "Latest analysis" } else { "Past analysis" };
+                ai.push(Line::styled(format!("{which}: {meta}"), Style::new().dim()));
                 ai.push(Line::default());
                 for l in text.lines() {
                     if let Some(h) = l.strip_prefix('#') {
@@ -1292,7 +1316,11 @@ impl App {
             Paragraph::new(ai)
                 .wrap(Wrap { trim: false })
                 .scroll((self.ai_scroll, 0))
-                .block(Block::bordered().title(" AI analytics ")),
+                .block(Block::bordered().title(if count > 1 {
+                    format!(" AI analytics · {} of {count} · ←/→ older / newer ", count - self.ai_idx)
+                } else {
+                    " AI analytics ".to_string()
+                })),
             right,
         );
 
@@ -1302,7 +1330,7 @@ impl App {
         let keys = if self.ai_run.is_some() {
             [key(" c", "cancel run"), key("↑↓", "scroll list"), key("PgUp/PgDn", "scroll analysis"), key("Esc", "back")].concat()
         } else {
-            [key(" a", "run AI analytics"), key("s", "AI setup"), key("↑↓", "scroll list"), key("PgUp/PgDn", "scroll analysis"), key("Esc", "back")].concat()
+            [key(" a", "run AI analytics"), key("←→", "past analyses"), key("s", "AI setup"), key("↑↓", "scroll list"), key("PgUp/PgDn", "scroll analysis"), key("Esc", "back")].concat()
         };
         f.render_widget(Paragraph::new(Line::from(keys)), foot);
     }

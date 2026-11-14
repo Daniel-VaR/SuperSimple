@@ -117,6 +117,13 @@ enum AiCmd {
         #[arg(long, default_value_t = 7)]
         days: u32,
     },
+    /// List the saved analyses, newest first
+    History,
+    /// Print a saved analysis (1 = the latest, 2 = the one before, ...)
+    Show {
+        #[arg(default_value_t = 1)]
+        number: usize,
+    },
     /// Show what is configured, without changing anything
     Status,
 }
@@ -292,6 +299,22 @@ fn run_cmd(cmd: Cmd) -> Result<()> {
             }
         }
         Cmd::Ai { cmd: AiCmd::Status } => ai::print_status(),
+        Cmd::Ai { cmd: AiCmd::History } => {
+            let reports = ai::load_reports();
+            if reports.is_empty() {
+                println!("No saved analyses yet. Run one with `supersimple ai run`.");
+            }
+            for (i, (meta, _)) in reports.iter().enumerate() {
+                println!("{:>3}  {meta}", i + 1);
+            }
+        }
+        Cmd::Ai { cmd: AiCmd::Show { number } } => {
+            let reports = ai::load_reports();
+            match number.checked_sub(1).and_then(|i| reports.get(i)) {
+                Some((meta, text)) => println!("{meta}\n\n{text}"),
+                None => bail!("there is no analysis number {number} ({} saved)", reports.len()),
+            }
+        }
         Cmd::Ai { cmd: AiCmd::Test } => {
             let out = ai::run_test(&AtomicBool::new(false), |p| eprintln!("  … {p}"));
             println!("{}", out.summary_line());

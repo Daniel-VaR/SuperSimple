@@ -28,6 +28,9 @@ pub struct Subject {
     pub id: u64,
     pub title: String,
     pub created_at: DateTime<Utc>,
+    /// Set when the whole subject was finished (closed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub tasks: Vec<Task>,
 }
@@ -224,7 +227,7 @@ impl Data {
     /// New subject, placed after the subject that contains `after` (or at the end).
     pub fn add_subject(&mut self, title: &str, after: Option<u64>) -> u64 {
         let id = self.alloc();
-        let subject = Subject { id, title: title.to_string(), created_at: Utc::now(), tasks: vec![] };
+        let subject = Subject { id, title: title.to_string(), created_at: Utc::now(), done_at: None, tasks: vec![] };
         let at = match after.and_then(|a| self.find(a)) {
             Some(Loc::Subject(s)) | Some(Loc::Task(s, _)) | Some(Loc::Subtask(s, _, _)) => s + 1,
             None => self.subjects.len(),
@@ -241,6 +244,7 @@ impl Data {
         let task = self.new_task(title);
         let id = task.id;
         self.subjects[s].tasks.push(task);
+        self.subjects[s].done_at = None; // new work reopens a finished subject
         Ok(id)
     }
 
@@ -267,7 +271,10 @@ impl Data {
         task.note = on_note; // Enter on a note continues with another note line
         let new_id = task.id;
         match loc {
-            Loc::Subject(s) => self.subjects[s].tasks.insert(0, task),
+            Loc::Subject(s) => {
+                self.subjects[s].tasks.insert(0, task);
+                self.subjects[s].done_at = None; // new work reopens a finished subject
+            }
             Loc::Task(s, t) => self.subjects[s].tasks.insert(t + 1, task),
             Loc::Subtask(s, t, u) => self.subjects[s].tasks[t].subtasks.insert(u + 1, task),
         }
@@ -338,30 +345,77 @@ impl Data {
     }
 
     /// Mark done (stamping the time) or not done. Returns the new state.
+    /// On a subject this closes or reopens the subject itself; its tasks are
+    /// left as they are (see `finish_all`).
     pub fn set_done(&mut self, id: u64, done: bool) -> Result<bool> {
-        let task = self
-            .task_mut(id)
-            .ok_or_else(|| anyhow!("{id} is not a task or subtask"))?;
-        if task.note {
-            bail!("notes cannot be finished");
-        }
-        if done {
-            if task.done_at.is_none() {
-                task.done_at = Some(Utc::now());
+        let at = match self.loc(id)? {
+            Loc::Subject(s) => &mut self.subjects[s].done_at,
+            _ => {
+                let task = self.task_mut(id).unwrap();
+                if task.note {
+                    bail!("notes cannot be finished");
+                }
+                &mut task.done_at
             }
-        } else {
-            task.done_at = None;
+        };
+        if !done {
+            *at = None;
+        } else if at.is_none() {
+            *at = Some(Utc::now());
         }
         Ok(done)
     }
 
     pub fn toggle_done(&mut self, id: u64) -> Result<bool> {
-        let done = self
-            .task(id)
-            .ok_or_else(|| anyhow!("subjects cannot be marked done"))?
-            .done_at
-            .is_some();
+        let done = match self.loc(id)? {
+            Loc::Subject(s) => self.subjects[s].done_at.is_some(),
+            _ => self.task(id).unwrap().done_at.is_some(),
+        };
         self.set_done(id, !done)
+    }
+
+    pub fn is_done(&self, id: u64) -> bool {
+        match self.find(id) {
+            Some(Loc::Subject(s)) => self.subjects[s].done_at.is_some(),
+            Some(_) => self.task(id).is_some_and(|t| t.done_at.is_some()),
+            None => false,
+        }
+    }
+
+    /// How many tasks and subtasks under a subject are not finished yet.
+    pub fn open_under(&self, subject_id: u64) -> usize {
+        let Some(Loc::Subject(s)) = self.find(subject_id) else { return 0 };
+        self.subjects[s]
+            .tasks
+            .iter()
+            .flat_map(|t| std::iter::once(t).chain(&t.subtasks))
+            .filter(|x| !x.note && x.done_at.is_none())
+            .count()
+    }
+
+    /// Finish a subject together with every task and subtask still open in it
+    /// (all with the same time). Returns how many tasks and subtasks it finished.
+    pub fn finish_all(&mut self, subject_id: u64) -> Result<usize> {
+        let Loc::Subject(s) = self.loc(subject_id)? else {
+            bail!("{subject_id} is not a subject");
+        };
+        let now = Utc::now();
+        let mut n = 0;
+        let mut finish = |x: &mut Task| {
+            if !x.note && x.done_at.is_none() {
+                x.done_at = Some(now);
+                n += 1;
+            }
+        };
+        for t in &mut self.subjects[s].tasks {
+            t.subtasks.iter_mut().for_each(&mut finish);
+            finish(t);
+        }
+        let subject = &mut self.subjects[s];
+        if subject.done_at.is_none() {
+            subject.done_at = Some(now);
+        }
+        Ok(n)
     }
 
     pub fn delete(&mut self, id: u64) -> Result<()> {
@@ -442,7 +496,12 @@ impl Data {
             Loc::Subject(_) => unreachable!(),
         };
         match self.find(to) {
-            Some(Loc::Subject(s)) => self.subjects[s].tasks.push(item),
+            Some(Loc::Subject(s)) => {
+                if !item.note && item.done_at.is_none() {
+                    self.subjects[s].done_at = None; // open work reopens a finished subject
+                }
+                self.subjects[s].tasks.push(item)
+            }
             Some(Loc::Task(s, t)) => self.subjects[s].tasks[t].subtasks.push(item),
             _ => bail!("move target disappeared"),
         }
@@ -520,7 +579,36 @@ mod tests {
         assert!(d.task(report).unwrap().done_at.is_some());
         assert!(!d.toggle_done(report).unwrap());
         assert!(d.task(report).unwrap().done_at.is_none());
-        assert!(d.toggle_done(work).is_err());
+    }
+
+    #[test]
+    fn a_subject_can_be_finished_with_or_without_its_open_tasks() {
+        let (mut d, work, home, report, outline) = sample();
+        let note = d.add_note(work, "a note").unwrap();
+        assert_eq!(d.open_under(work), 2);
+        // the subject alone: its tasks stay open
+        assert!(d.toggle_done(work).unwrap());
+        assert!(d.is_done(work) && !d.is_done(report) && !d.is_done(outline));
+        assert!(!d.toggle_done(work).unwrap());
+        assert!(!d.is_done(work));
+        // the subject with everything in it; notes are never finished
+        assert_eq!(d.finish_all(work).unwrap(), 2);
+        assert!(d.is_done(work) && d.is_done(report) && d.is_done(outline) && !d.is_done(note));
+        assert_eq!(d.open_under(work), 0);
+        assert!(d.finish_all(report).is_err());
+        // new work in a finished subject reopens it
+        d.add_task(work, "One more").unwrap();
+        assert!(!d.is_done(work));
+        d.set_done(home, true).unwrap();
+        let extra = d.add_task(work, "Extra").unwrap();
+        d.move_item(extra, home).unwrap();
+        assert!(!d.is_done(home));
+        // files written before subjects could be finished still load, and the time is kept
+        d.set_done(home, true).unwrap();
+        let back: Data = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert!(back.is_done(home) && !back.is_done(work));
+        let old = r#"{"next_id":2,"subjects":[{"id":1,"title":"Old","created_at":"2026-01-01T00:00:00Z","tasks":[]}]}"#;
+        assert!(!serde_json::from_str::<Data>(old).unwrap().is_done(1));
     }
 
     #[test]

@@ -68,9 +68,14 @@ enum Cmd {
         #[arg(long)]
         append: Option<String>,
     },
-    /// Mark a task or subtask finished (records the time)
-    Done { id: u64 },
-    /// Mark a task or subtask not finished
+    /// Mark a task, subtask or subject finished (records the time)
+    Done {
+        id: u64,
+        /// On a subject: also finish every task and subtask still open in it
+        #[arg(long)]
+        all: bool,
+    },
+    /// Mark a task, subtask or subject not finished
     Undone { id: u64 },
     /// Change the text of a subject, task or subtask
     Rename { id: u64, title: String },
@@ -224,9 +229,27 @@ fn run_cmd(cmd: Cmd) -> Result<()> {
                 }
             }
         }
-        Cmd::Done { id } => {
-            let (d, _) = store::mutate(|d| d.set_done(id, true))?;
+        Cmd::Done { id, all } => {
+            let is_subject = |d: &Data| d.kind(id) == Some(model::Kind::Subject);
+            let (d, finished) = store::mutate(|d| {
+                if all && !is_subject(d) {
+                    bail!("--all is for a subject: it also finishes the tasks in it");
+                }
+                if all {
+                    d.finish_all(id)
+                } else {
+                    d.set_done(id, true).map(|_| 0)
+                }
+            })?;
             println!("done: {}", d.path(id));
+            if all {
+                println!("also finished {finished} open tasks and subtasks in it");
+            } else if is_subject(&d) && d.open_under(id) > 0 {
+                println!(
+                    "{} tasks and subtasks in it are still open (add --all to finish them too)",
+                    d.open_under(id)
+                );
+            }
         }
         Cmd::Undone { id } => {
             let (d, _) = store::mutate(|d| d.set_done(id, false))?;
@@ -313,7 +336,11 @@ fn print_tree(data: &Data) {
         None => ("[ ]", String::new()),
     };
     for s in &data.subjects {
-        println!("#{} {}", s.id, s.title);
+        let when = match s.done_at {
+            Some(at) => format!("  (done {})", at.with_timezone(&Local).format("%Y-%m-%d %H:%M")),
+            None => String::new(),
+        };
+        println!("#{} {}{when}", s.id, s.title);
         for t in &s.tasks {
             let (m, when) = mark(t);
             println!("  {m} #{} {}{when}", t.id, t.title);
@@ -335,6 +362,8 @@ Structure: subjects contain tasks, tasks contain subtasks. Every item has a
 numeric id, shown as #N by `supersimple list`. A note is free text under a
 subject or task; it cannot be finished, but can be renamed, moved and deleted.
 A note has a title (one line, shown in the list) and text inside (many lines).
+A finished subject is closed: it is hidden in the editor with everything in it
+until the user shows finished items. Adding a task to it reopens it.
 
   supersimple list [--json]                      show everything with ids
   supersimple add-subject "Title"                new subject
@@ -346,7 +375,8 @@ A note has a title (one line, shown in the list) and text inside (many lines).
   supersimple note <id>                          print the text inside a note
   supersimple note <id> --set "text"             replace the text inside a note
   supersimple note <id> --append "text"          add text at the end of a note
-  supersimple done <id> / undone <id>            finish / reopen a task or subtask
+  supersimple done <id> / undone <id>            finish / reopen a task, subtask or subject
+  supersimple done <subject id> --all            finish a subject and every task still open in it
   supersimple rename <id> "New title"
   supersimple move <id> --to <id>                task -> subject, subtask -> task
   supersimple delete <id>                        also deletes everything under it

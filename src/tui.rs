@@ -9,9 +9,11 @@ use ratatui::crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
     KeyModifiers,
 };
+use ratatui::crossterm::cursor::{MoveTo, Show};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, Clear as ClearScreen, ClearType, EnterAlternateScreen,
+    LeaveAlternateScreen,
 };
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
@@ -65,22 +67,98 @@ struct Picker {
     item: u64,
     filter: String,
     idx: usize,
-    options: Vec<(u64, String)>,
+    options: Vec<Opt>,
+}
+
+/// One row of a picker: the item's own text first, where it lives after it.
+struct Opt {
+    id: u64,
+    text: String,
+    /// "Subject" or "Subject › Task" the item sits in; empty for a subject
+    path: String,
+    /// "✓" finished, "✎" note, "" otherwise
+    mark: &'static str,
+}
+
+impl Opt {
+    fn new(id: u64, text: &str, path: String, mark: &'static str) -> Opt {
+        Opt { id, text: text.to_string(), path, mark }
+    }
+
+    fn of_task(t: &Task, path: String) -> Opt {
+        let mark = match t.done_at {
+            _ if t.note => "✎",
+            Some(_) => "✓",
+            None => "",
+        };
+        Opt::new(t.id, &t.title, path, mark)
+    }
 }
 
 impl Picker {
-    fn visible(&self) -> Vec<&(u64, String)> {
-        // every typed word must appear somewhere in the label
+    fn visible(&self) -> Vec<&Opt> {
+        // every typed word must appear somewhere in the item's text or its path
         let f = self.filter.to_lowercase();
         let words: Vec<&str> = f.split_whitespace().collect();
         self.options
             .iter()
-            .filter(|(_, label)| {
-                let l = label.to_lowercase();
+            .filter(|o| {
+                let l = format!("{} {}", o.text, o.path).to_lowercase();
                 words.iter().all(|w| l.contains(w))
             })
             .collect()
     }
+}
+
+/// Cut `s` to at most `max` columns, ending with … when something was cut.
+fn fit(s: &str, max: usize) -> String {
+    if s.width() <= max {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut w = 0;
+    for c in s.chars() {
+        if w + cwidth(c) + 1 > max {
+            break;
+        }
+        w += cwidth(c);
+        out.push(c);
+    }
+    if max > 0 {
+        out.push('…');
+    }
+    out
+}
+
+/// Like `fit`, but keeps the start and the end and cuts the middle.
+fn fit_middle(s: &str, max: usize) -> String {
+    if s.width() <= max {
+        return s.to_string();
+    }
+    if max < 5 {
+        return fit(s, max);
+    }
+    let tail_w = (max - 1) / 2;
+    let head_w = max - 1 - tail_w;
+    let mut head = String::new();
+    let mut w = 0;
+    for c in s.chars() {
+        if w + cwidth(c) > head_w {
+            break;
+        }
+        w += cwidth(c);
+        head.push(c);
+    }
+    let mut tail = vec![];
+    let mut w = 0;
+    for c in s.chars().rev() {
+        if w + cwidth(c) > tail_w {
+            break;
+        }
+        w += cwidth(c);
+        tail.push(c);
+    }
+    format!("{head}…{}", tail.into_iter().rev().collect::<String>())
 }
 
 enum Mode {
@@ -89,6 +167,8 @@ enum Mode {
     Find(Picker),
     Note(NoteEditor),
     ConfirmDelete(u64),
+    /// Finishing a subject that still has open tasks: finish them too?
+    ConfirmFinish(u64),
     Retro,
 }
 
@@ -176,7 +256,8 @@ impl App {
     fn rows(&self) -> Vec<Row> {
         let mut rows = vec![];
         let show = |t: &Task| self.show_done || t.done_at.is_none();
-        for s in &self.data.subjects {
+        // a finished subject is hidden together with everything in it
+        for s in self.data.subjects.iter().filter(|s| self.show_done || s.done_at.is_none()) {
             rows.push(Row { id: s.id });
             for t in s.tasks.iter().filter(|t| show(t)) {
                 rows.push(Row { id: t.id });
@@ -374,6 +455,15 @@ impl App {
                     }
                 }
             }
+            Mode::ConfirmFinish(id) => {
+                let id = *id;
+                self.mode = Mode::Edit;
+                match k.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => self.finish_subject(id, true),
+                    KeyCode::Char('n') | KeyCode::Char('N') => self.finish_subject(id, false),
+                    _ => self.flash("not finished"),
+                }
+            }
             Mode::Retro => self.key_retro(k, term)?,
             Mode::Note(_) => self.key_note(k),
         }
@@ -527,7 +617,15 @@ impl App {
     fn toggle_done(&mut self) {
         let Some(id) = self.sel else { return };
         if self.data.kind(id) == Some(Kind::Subject) {
-            self.flash("a subject cannot be finished - only tasks and subtasks");
+            if self.data.is_done(id) {
+                if self.apply(|d| d.set_done(id, false)).is_some() {
+                    self.flash("subject reopened");
+                }
+            } else if self.data.open_under(id) > 0 {
+                self.mode = Mode::ConfirmFinish(id);
+            } else {
+                self.finish_subject(id, false);
+            }
             return;
         }
         if self.data.is_note(id) {
@@ -536,6 +634,22 @@ impl App {
         }
         if let Some(done) = self.apply(|d| d.toggle_done(id)) {
             self.flash(if done { "✓ finished - time recorded" } else { "reopened" });
+        }
+    }
+
+    /// Close a subject; `with_tasks` also finishes everything still open in it.
+    fn finish_subject(&mut self, id: u64, with_tasks: bool) {
+        let done = if with_tasks {
+            self.apply(|d| d.finish_all(id)).is_some()
+        } else {
+            self.apply(|d| d.set_done(id, true)).is_some()
+        };
+        if done {
+            self.flash(if self.show_done {
+                "✓ subject finished - time recorded"
+            } else {
+                "✓ subject finished and hidden - Ctrl+V shows finished items"
+            });
         }
     }
 
@@ -602,17 +716,17 @@ impl App {
                 };
                 for (i, s) in self.data.subjects.iter().enumerate() {
                     if i != si || parent_task.is_some() {
-                        options.push((s.id, s.title.clone()));
+                        options.push(subject_opt(s));
                     }
                     for t in s.tasks.iter().filter(|t| !t.note && Some(t.id) != parent_task) {
-                        options.push((t.id, format!("{} › {}", s.title, t.title)));
+                        options.push(Opt::of_task(t, s.title.clone()));
                     }
                 }
             }
             Some(crate::model::Loc::Task(si, _)) => {
                 for (i, s) in self.data.subjects.iter().enumerate() {
                     if i != si {
-                        options.push((s.id, s.title.clone()));
+                        options.push(subject_opt(s));
                     }
                 }
             }
@@ -620,7 +734,7 @@ impl App {
                 let parent = self.data.subjects[si].tasks[ti].id;
                 for s in &self.data.subjects {
                     for t in s.tasks.iter().filter(|t| t.id != parent && !t.note) {
-                        options.push((t.id, format!("{} › {}", s.title, t.title)));
+                        options.push(Opt::of_task(t, s.title.clone()));
                     }
                 }
             }
@@ -641,17 +755,12 @@ impl App {
     /// Search box: every subject, task and subtask, filtered as you type.
     fn open_find(&mut self) {
         let mut options = vec![];
-        let label = |path: String, t: &Task| match t.done_at {
-            _ if t.note => format!("{path}  ✎"),
-            Some(_) => format!("{path}  ✓"),
-            None => path,
-        };
         for s in &self.data.subjects {
-            options.push((s.id, s.title.clone()));
+            options.push(subject_opt(s));
             for t in &s.tasks {
-                options.push((t.id, label(format!("{} › {}", s.title, t.title), t)));
+                options.push(Opt::of_task(t, s.title.clone()));
                 for u in &t.subtasks {
-                    options.push((u.id, label(format!("{} › {} › {}", s.title, t.title, u.title), u)));
+                    options.push(Opt::of_task(u, format!("{} › {}", s.title, t.title)));
                 }
             }
         }
@@ -676,10 +785,10 @@ impl App {
         for s in &self.data.subjects {
             for t in &s.tasks {
                 if t.note {
-                    options.push((t.id, format!("{}  ·  {}", t.title, s.title)));
+                    options.push(Opt::new(t.id, &t.title, s.title.clone(), ""));
                 }
                 for u in t.subtasks.iter().filter(|u| u.note) {
-                    options.push((u.id, format!("{}  ·  {} › {}", u.title, s.title, t.title)));
+                    options.push(Opt::new(u.id, &u.title, format!("{} › {}", s.title, t.title), ""));
                 }
             }
         }
@@ -714,7 +823,7 @@ impl App {
                 p.idx = 0;
             }
             KeyCode::Enter => {
-                let target = p.visible().get(p.idx).map(|(id, _)| *id);
+                let target = p.visible().get(p.idx).map(|o| o.id);
                 let item = p.item;
                 let find = p.find;
                 let open = p.open_note;
@@ -758,16 +867,25 @@ impl App {
                 }
             }
             KeyCode::Char('s') if self.ai_run.is_none() => {
-                // the wizard is a plain question-and-answer flow: step out of the full-screen UI
-                leave();
-                println!();
+                // The wizard is a plain question-and-answer flow. It runs on our own
+                // screen, wiped first, so nothing of the editor is left under its text
+                // and the terminal's own screen and history are not touched.
+                let _ = disable_raw_mode();
+                execute!(
+                    stdout(),
+                    DisableBracketedPaste,
+                    ClearScreen(ClearType::All),
+                    MoveTo(0, 0),
+                    Show
+                )?;
                 if let Err(e) = ai::setup_wizard() {
                     println!("setup failed: {e:#}");
                 }
                 println!("\nPress Enter to go back to Super Simple…");
                 let mut line = String::new();
                 let _ = io::stdin().read_line(&mut line);
-                *term = enter()?;
+                enable_raw_mode()?;
+                execute!(stdout(), EnableBracketedPaste)?;
                 term.clear()?;
                 self.ai_error = None;
             }
@@ -882,7 +1000,7 @@ impl App {
                 prefix += 4;
             }
             let style = match (kind, done) {
-                (Kind::Subject, _) => Style::new().fg(ACCENT).bold(),
+                (Kind::Subject, None) => Style::new().fg(ACCENT).bold(),
                 (_, Some(_)) => Style::new().dim().crossed_out(),
                 (Kind::Task, None) => Style::new(),
                 (Kind::Subtask, None) => Style::new(),
@@ -905,14 +1023,14 @@ impl App {
             lines.push(Line::from(spans));
         };
 
-        for (i, s) in self.data.subjects.iter().enumerate() {
-            if i > 0 {
+        for s in self.data.subjects.iter().filter(|s| self.show_done || s.done_at.is_none()) {
+            if !lines.is_empty() {
                 lines.push(Line::default());
             }
             let total = s.tasks.iter().filter(|t| !t.note).count();
             let finished = s.tasks.iter().filter(|t| t.done_at.is_some()).count();
             let extra = if total > 0 { format!("  {finished}/{total}") } else { String::new() };
-            push(&mut lines, s.id, Kind::Subject, false, &s.title, None, extra);
+            push(&mut lines, s.id, Kind::Subject, false, &s.title, s.done_at, extra);
             for t in s.tasks.iter().filter(|t| show(t)) {
                 push(&mut lines, t.id, Kind::Task, t.note, &t.title, t.done_at, note_info(t));
                 for u in t.subtasks.iter().filter(|u| show(u)) {
@@ -920,7 +1038,13 @@ impl App {
                 }
             }
         }
-        if lines.is_empty() {
+        if lines.is_empty() && !self.data.subjects.is_empty() {
+            lines.push(Line::default());
+            lines.push(Line::styled(
+                "  Everything here is finished. Ctrl+V shows finished items, Ctrl+S starts a new subject.",
+                Style::new().dim(),
+            ));
+        } else if lines.is_empty() {
             lines.push(Line::default());
             lines.push(Line::styled(
                 "  Nothing here yet. Just start typing to create your first subject,",
@@ -954,6 +1078,23 @@ impl App {
                     Line::from([key("y", "delete"), key("any other key", "keep")].concat()),
                 ]
             }
+            Mode::ConfirmFinish(id) => {
+                let n = self.data.open_under(*id);
+                let (tasks, them) = if n == 1 {
+                    ("1 task is".to_string(), "it")
+                } else {
+                    (format!("{n} tasks are"), "them")
+                };
+                vec![
+                    Line::styled(
+                        format!(" {tasks} still open in this subject. Finish {them} too?"),
+                        Style::new().fg(Color::Yellow).bold(),
+                    ),
+                    Line::from(
+                        [key(" y", "finish everything"), key("n", "only the subject"), key("Esc", "cancel")].concat(),
+                    ),
+                ]
+            }
             _ => vec![
                 Line::from(
                     [key(" Enter", "new line / open note"), key("^N", "task / subtask"), key("^S", "subject"), key("^O", "note"), key("^D", "finish"), key("^T", "move"), key("^X", "delete"), key("^Z", "undo delete")].concat(),
@@ -982,7 +1123,8 @@ impl App {
     fn draw_picker(&self, f: &mut Frame, p: &Picker) {
         let area = f.area();
         let visible = p.visible();
-        let w = (area.width.saturating_sub(4)).min(70).max(20);
+        // most of the screen, so long names fit
+        let w = ((area.width as u32 * 9 / 10) as u16).clamp(20, 160);
         let h = (visible.len() as u16 + 4).min(area.height.saturating_sub(2)).max(5);
         let rect = Rect::new(
             area.x + (area.width.saturating_sub(w)) / 2,
@@ -1010,13 +1152,29 @@ impl App {
         ])];
         let list_h = inner.height.saturating_sub(1) as usize;
         let first = p.idx.saturating_sub(list_h.saturating_sub(1));
-        for (i, (_, label)) in visible.iter().enumerate().skip(first).take(list_h) {
-            let label = if label.is_empty() { "(untitled)" } else { label.as_str() };
-            if i == p.idx {
-                lines.push(Line::styled(format!("▌ {label}"), Style::new().fg(ACCENT).bold()));
-            } else {
-                lines.push(Line::raw(format!("  {label}")));
+        let avail = (inner.width as usize).saturating_sub(2);
+        for (i, o) in visible.iter().enumerate().skip(first).take(list_h) {
+            // the item's own text comes first and gets the room; where it lives
+            // follows, dimmed, and is the part that is shortened
+            let text = if o.text.is_empty() { "(untitled)" } else { o.text.as_str() };
+            let mark_w = if o.mark.is_empty() { 0 } else { 2 };
+            let path_w = o.path.width();
+            let reserve = if path_w == 0 { 0 } else { path_w.min(10) + 3 };
+            let text = fit(text, avail.saturating_sub(reserve + mark_w));
+            let rest = avail.saturating_sub(text.width() + mark_w + 3);
+            let selected = i == p.idx;
+            let mut spans = vec![
+                Span::styled(if selected { "▌ " } else { "  " }, Style::new().fg(ACCENT)),
+                Span::styled(text, if selected { Style::new().fg(ACCENT).bold() } else { Style::new() }),
+            ];
+            if !o.mark.is_empty() {
+                let color = if o.mark == "✓" { Color::Green } else { Color::Yellow };
+                spans.push(Span::styled(format!(" {}", o.mark), Style::new().fg(color)));
             }
+            if path_w > 0 && rest > 0 {
+                spans.push(Span::styled(format!("   {}", fit_middle(&o.path, rest)), Style::new().dim()));
+            }
+            lines.push(Line::from(spans));
         }
         if visible.is_empty() {
             lines.push(Line::styled("  no match", Style::new().dim()));
@@ -1148,6 +1306,10 @@ impl App {
         };
         f.render_widget(Paragraph::new(Line::from(keys)), foot);
     }
+}
+
+fn subject_opt(s: &crate::model::Subject) -> Opt {
+    Opt::new(s.id, &s.title, String::new(), if s.done_at.is_some() { "✓" } else { "" })
 }
 
 // ---------------------------------------------------------------- note editor

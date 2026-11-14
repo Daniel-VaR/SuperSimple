@@ -27,13 +27,13 @@ saved on every keystroke.
 | `Ctrl+O` | New note under the subject or task (cannot be finished). Type its title, then `Enter` opens it |
 | `Enter` on a note | Opens the note full-screen, like a text file: write as many lines as you want, `Esc` goes back |
 | `Ctrl+L` | List all notes; type to filter, `Enter` opens one |
-| `Ctrl+D` | Finish / reopen the task or subtask (records the time) |
+| `Ctrl+D` | Finish / reopen the task or subtask (records the time). On a subject it closes the whole subject; if tasks are still open it asks whether to finish them too |
 | `Ctrl+T` | Move: a task to another subject, a subtask to another task |
 | `Ctrl+X` | Delete (asks first) |
 | `Ctrl+Z` | Undo delete: brings back the last deleted item with everything under it |
 | `Shift+↑/↓` | Reorder |
-| `Ctrl+F` | Find: type to search all items, `Enter` jumps to the chosen one |
-| `Ctrl+V` | Show / hide finished items |
+| `Ctrl+F` | Find: type to search all items, `Enter` jumps to the chosen one. Each result shows the item's own text first, then where it lives |
+| `Ctrl+V` | Show / hide finished items (a finished subject is hidden with everything in it) |
 | `Ctrl+R` | Weekly retrospective (last 7 days) |
 | `Ctrl+Q` | Quit |
 
@@ -42,8 +42,8 @@ Also: arrows, `Home`/`End`, `Ctrl+A`/`Ctrl+E`, `Ctrl+W` (delete word),
 
 ## Weekly retrospective and AI analytics
 
-`Ctrl+R` shows what you finished in the last 7 days, grouped by day. In that
-screen:
+`Ctrl+R` shows what you finished in the last 7 days, grouped by day; a closed
+subject is one line of its own. In that screen:
 
 - `a` runs AI analytics: Claude (through the Claude Agent SDK) loads the
   `weekly-retro` skill, whose two scripts collect your finished tasks and a
@@ -81,7 +81,8 @@ supersimple agent-help
 ```
 
 prints a short guide (list / add / done / rename / move / delete / retro, all
-by numeric id). Changes made this way appear in an open editor within a
+by numeric id). `supersimple done <subject id> --all` closes a subject together
+with the tasks still open in it. Changes made this way appear in an open editor within a
 fraction of a second.
 
 ## Files

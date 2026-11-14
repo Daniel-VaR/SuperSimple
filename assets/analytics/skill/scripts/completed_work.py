@@ -45,7 +45,7 @@ def main():
         print(f"Could not read {path}: {e}")
         sys.exit(1)
 
-    done_tasks = done_subtasks = 0
+    done_tasks = done_subtasks = closed_subjects = 0
     still_open = []
     print("\n## Finished")
     any_done = False
@@ -79,10 +79,17 @@ def main():
                 created = parse_time(task.get("created_at"))
                 if created and created >= since:
                     still_open.append(f"{subject.get('title', '')} › {task.get('title', '')}")
-        if lines:
+        closed = parse_time(subject.get("done_at"))
+        closed_in = closed is not None and closed >= since
+        if closed_in:
+            closed_subjects += 1
+        if lines or closed_in:
             any_done = True
             print(f"\n### Subject: {subject.get('title', '')}")
-            print("\n".join(lines))
+            if closed_in:
+                print(f"- whole subject closed {local(closed)}")
+            if lines:
+                print("\n".join(lines))
     if not any_done:
         print("Nothing was marked finished in this period.")
 
@@ -93,7 +100,7 @@ def main():
     else:
         print("None.")
 
-    print(f"\n## Totals\n{done_tasks} tasks and {done_subtasks} subtasks finished.")
+    print(f"\n## Totals\n{done_tasks} tasks and {done_subtasks} subtasks finished, {closed_subjects} subjects closed.")
 
 
 if __name__ == "__main__":

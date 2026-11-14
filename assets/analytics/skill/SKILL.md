@@ -20,7 +20,7 @@ Use the `--days` value you were asked for. Run each command exactly in this
 form (no pipes, no `cd`, no other flags). Do not run any other command and do
 not read any other file: these two outputs are your only sources.
 
-- `completed_work.py` prints the finished tasks and subtasks with timestamps,
+- `completed_work.py` prints the finished tasks and subtasks (and subjects closed as a whole) with timestamps,
   grouped by subject, plus tasks that were created in the period and are still open.
 - `transcripts.py` prints a digest of the Claude Code sessions in the period:
   per project and session, the time span, the user's requests, files changed
